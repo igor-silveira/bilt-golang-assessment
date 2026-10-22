@@ -30,10 +30,6 @@ type Entry struct {
 // ErrUnavailable is returned when the ledger cannot be reached. Retrying may succeed.
 var ErrUnavailable = errors.New("ledger: unavailable")
 
-// ErrDuplicate is returned by Append when the payment already has an entry of
-// that kind. In Postgres this is the UNIQUE (payment_id, kind) constraint.
-var ErrDuplicate = errors.New("ledger: duplicate entry")
-
 // ErrNotAwarded is returned by Reverse when the payment has no award entry.
 var ErrNotAwarded = errors.New("ledger: payment was never awarded")
 
@@ -148,24 +144,25 @@ func (s *MemoryStore) Reverse(ctx context.Context, paymentID string) (Entry, boo
 	return e, true, nil
 }
 
-// Append writes e as is. It enforces one entry per (payment, kind) like the
-// production table; use Award and Reverse to apply the earning rules.
+// Append writes e as is, without applying the earning rules; it is for seeding
+// and tooling. Award and Reverse see appended entries.
 func (s *MemoryStore) Append(ctx context.Context, e Entry) error {
 	if err := s.roundTrip(ctx, "append"); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.byKey[entryKey{e.PaymentID, e.Kind}]; ok {
-		return ErrDuplicate
-	}
 	s.insert(e)
 	return nil
 }
 
-// insert must be called with mu held.
+// insert must be called with mu held. byKey keeps the first entry per
+// (payment, kind), which is the one Award and Reverse treat as stored.
 func (s *MemoryStore) insert(e Entry) {
-	s.byKey[entryKey{e.PaymentID, e.Kind}] = len(s.entries)
+	k := entryKey{e.PaymentID, e.Kind}
+	if _, ok := s.byKey[k]; !ok {
+		s.byKey[k] = len(s.entries)
+	}
 	s.entries = append(s.entries, e)
 }
 

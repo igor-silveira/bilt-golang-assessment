@@ -158,19 +158,29 @@ func TestFaults_LeaveNoEffect(t *testing.T) {
 	}
 }
 
-func TestAppend_RejectsDuplicateEntry(t *testing.T) {
+func TestAppend_WritesAsIsAndAwardSeesIt(t *testing.T) {
 	s := ledger.NewMemoryStore()
-	e := ledger.Entry{MemberID: "mbr_1", PaymentID: "pay_1", Kind: ledger.KindAward, Points: 10, Month: "2026-10"}
+	seed := ledger.Entry{MemberID: "mbr_1", Kind: ledger.KindAward, Points: 100, Month: "2026-10"}
+	for i := 0; i < 2; i++ { // seeding entries without a payment is allowed
+		if err := s.Append(ctx, seed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := ledger.Entry{MemberID: "mbr_1", PaymentID: "pay_1", Kind: ledger.KindAward, Points: 9000, Month: "2026-10"}
 	if err := s.Append(ctx, e); err != nil {
 		t.Fatal(err)
-	}
-	if err := s.Append(ctx, e); !errors.Is(err, ledger.ErrDuplicate) {
-		t.Fatalf("err = %v, want ErrDuplicate", err)
 	}
 	if _, created, _ := s.Award(ctx, award("pay_1", "mbr_1", 99), capPoints); created {
 		t.Fatal("Award created a second award for an appended payment")
 	}
-	if got := balance(t, s, "mbr_1"); got != 10 {
-		t.Fatalf("balance = %d, want 10", got)
+	got, _, err := s.Award(ctx, award("pay_2", "mbr_1", 1000), capPoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Points != 800 {
+		t.Fatalf("awarded %d, want 800 (appended entries count toward the cap)", got.Points)
+	}
+	if got := balance(t, s, "mbr_1"); got != 10_000 {
+		t.Fatalf("balance = %d, want 10000", got)
 	}
 }
