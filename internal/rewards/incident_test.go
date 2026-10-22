@@ -150,16 +150,27 @@ func TestAward_CapAndDedupeHoldUnderRedeliveryAndFaults(t *testing.T) {
 	replicas := []*rewards.Handler{newHandler(store), newHandler(store), newHandler(store)}
 
 	var fns []func()
-	for i := 0; i < 30; i++ {
-		// 15 payments of 1,000, each delivered to two different replicas.
-		h, ev := replicas[i%3], settled(fmt.Sprintf("pay_%d", i%15), "mbr_1", 1000)
+	add := func(i int, ev event) {
+		h := replicas[i%3]
 		fns = append(fns, func() { deliver(t, h, ev) })
+	}
+	for i := 0; i < 30; i++ {
+		// mbr_cap: 15 payments of 1,000, each delivered to two replicas; the cap binds.
+		add(i, settled(fmt.Sprintf("pay_cap_%d", i%15), "mbr_cap", 1000))
+	}
+	for i := 0; i < 15; i++ {
+		// mbr_dup: 5 payments of 1,000, each delivered to three replicas; under
+		// the cap, so any double award shows in the balance.
+		add(i%5+i/5, settled(fmt.Sprintf("pay_dup_%d", i%5), "mbr_dup", 1000))
 	}
 	concurrently(fns...)
 	faulty.Store(false)
 
-	if got := balance(t, store, "mbr_1"); got != rewards.DefaultPolicy.MonthlyCap {
-		t.Fatalf("balance = %d, want %d", got, rewards.DefaultPolicy.MonthlyCap)
+	if got := balance(t, store, "mbr_cap"); got != rewards.DefaultPolicy.MonthlyCap {
+		t.Fatalf("mbr_cap balance = %d, want %d", got, rewards.DefaultPolicy.MonthlyCap)
+	}
+	if got := balance(t, store, "mbr_dup"); got != 5000 {
+		t.Fatalf("mbr_dup balance = %d, want 5000 (payment awarded more than once)", got)
 	}
 }
 

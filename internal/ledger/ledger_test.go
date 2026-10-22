@@ -69,19 +69,30 @@ func TestAward_CutsToMonthlyCapPerMemberAndMonth(t *testing.T) {
 func TestAward_ConcurrentAwardsRespectCapAndDeduplicate(t *testing.T) {
 	s := ledger.NewMemoryStore(ledger.WithLatency(time.Millisecond))
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	run := func(paymentID, memberID string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// 25 distinct payments, each delivered twice.
-			if _, _, err := s.Award(ctx, award(fmt.Sprintf("pay_%d", i%25), "mbr_1", 1000), capPoints); err != nil {
+			if _, _, err := s.Award(ctx, award(paymentID, memberID, 1000), capPoints); err != nil {
 				t.Error(err)
 			}
 		}()
 	}
+	for i := 0; i < 50; i++ {
+		// mbr_cap: 25 payments of 1,000, each delivered twice; only the cap binds.
+		run(fmt.Sprintf("pay_cap_%d", i%25), "mbr_cap")
+	}
+	for i := 0; i < 20; i++ {
+		// mbr_dup: 5 payments of 1,000, each delivered 4 times; stays under the
+		// cap, so any double award shows in the balance.
+		run(fmt.Sprintf("pay_dup_%d", i%5), "mbr_dup")
+	}
 	wg.Wait()
-	if got := balance(t, s, "mbr_1"); got != capPoints {
-		t.Fatalf("balance = %d, want %d", got, capPoints)
+	if got := balance(t, s, "mbr_cap"); got != capPoints {
+		t.Fatalf("mbr_cap balance = %d, want %d", got, capPoints)
+	}
+	if got := balance(t, s, "mbr_dup"); got != 5000 {
+		t.Fatalf("mbr_dup balance = %d, want 5000 (payment awarded more than once)", got)
 	}
 }
 
