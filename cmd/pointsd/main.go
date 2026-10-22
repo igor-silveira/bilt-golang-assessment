@@ -14,22 +14,45 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/rentpoints/pointsd/internal/api"
 	"github.com/rentpoints/pointsd/internal/ledger"
 	"github.com/rentpoints/pointsd/internal/rewards"
 )
 
+// maxReplayAttempts bounds local redelivery of a nacked line.
+const maxReplayAttempts = 5
+
 type fileMessage struct {
-	id   string
-	data []byte
+	id      string
+	data    []byte
+	attempt int
+	nacked  bool
 }
 
-func (m fileMessage) ID() string           { return m.id }
-func (m fileMessage) Data() []byte         { return m.data }
-func (m fileMessage) DeliveryAttempt() int { return 1 }
-func (m fileMessage) Ack()                 {}
-func (m fileMessage) Nack()                {}
+func (m *fileMessage) ID() string           { return m.id }
+func (m *fileMessage) Data() []byte         { return m.data }
+func (m *fileMessage) DeliveryAttempt() int { return m.attempt }
+func (m *fileMessage) Ack()                 {}
+func (m *fileMessage) Nack()                { m.nacked = true }
+
+// replay delivers one line, redelivering it with a backoff while it is nacked,
+// like the broker would.
+func replay(handler *rewards.Handler, log *slog.Logger, id string, data []byte) {
+	for attempt := 1; ; attempt++ {
+		msg := &fileMessage{id: id, data: data, attempt: attempt}
+		handler.Handle(context.Background(), msg)
+		if !msg.nacked {
+			return
+		}
+		if attempt == maxReplayAttempts {
+			log.Error("giving up on event", "msg_id", id, "attempts", attempt)
+			return
+		}
+		time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+	}
+}
 
 type logPublisher struct{ log *slog.Logger }
 
@@ -55,7 +78,7 @@ func main() {
 		}
 		sc := bufio.NewScanner(f)
 		for n := 1; sc.Scan(); n++ {
-			handler.Handle(context.Background(), fileMessage{id: strconv.Itoa(n), data: append([]byte(nil), sc.Bytes()...)})
+			replay(handler, log, strconv.Itoa(n), append([]byte(nil), sc.Bytes()...))
 		}
 		f.Close()
 	}
