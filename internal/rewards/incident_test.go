@@ -1,8 +1,11 @@
 package rewards_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -157,5 +160,26 @@ func TestAward_CapAndDedupeHoldUnderRedeliveryAndFaults(t *testing.T) {
 
 	if got := balance(t, store, "mbr_1"); got != rewards.DefaultPolicy.MonthlyCap {
 		t.Fatalf("balance = %d, want %d", got, rewards.DefaultPolicy.MonthlyCap)
+	}
+}
+
+func TestReversal_OfPaymentCappedToZeroIsLoggedForFinance(t *testing.T) {
+	var logs bytes.Buffer
+	store := ledger.NewMemoryStore()
+	h := rewards.NewHandler(store, rewards.DefaultPolicy, &fakeDLQ{}, slog.New(slog.NewTextHandler(&logs, nil)))
+	deliver(t, h, settled("pay_1", "mbr_1", 10_000))
+	deliver(t, h, settled("pay_2", "mbr_1", 500)) // capped: 0 awarded
+
+	msg := deliver(t, h, reversed("pay_2", "mbr_1", 500))
+
+	if msg.outcome(t) != acked {
+		t.Fatal("reversal of a payment capped to 0 was not acked")
+	}
+	if !strings.Contains(logs.String(), "reversal for payment that never earned points") ||
+		!strings.Contains(logs.String(), "payment_id=pay_2") {
+		t.Fatalf("no finance log for the reversal of pay_2; logs:\n%s", logs.String())
+	}
+	if got := balance(t, store, "mbr_1"); got != 10_000 {
+		t.Fatalf("balance = %d, want 10000", got)
 	}
 }

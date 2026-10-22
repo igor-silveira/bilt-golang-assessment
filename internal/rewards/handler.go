@@ -44,9 +44,8 @@ func (h *Handler) Handle(ctx context.Context, msg pubsub.Message) {
 	case err == nil:
 		msg.Ack()
 	case errors.Is(err, ErrUnknownPayment):
-		// Retrying cannot make the payment earn; finance reconciles from this log.
-		h.log.Warn("reversal for payment that never earned points", "payment_id", ev.PaymentID,
-			"member_id", ev.MemberID, "amount_cents", ev.AmountCents, "event_id", ev.EventID)
+		// Retrying cannot make the payment earn.
+		h.logNeverEarned(ev, "no award entry")
 		msg.Ack()
 	default:
 		// Ledger errors (ErrUnavailable, timeouts) are transient: nack so the broker
@@ -99,8 +98,21 @@ func (h *Handler) reverse(ctx context.Context, ev events.Payment) error {
 	}
 	if !created {
 		h.log.Info("payment already reversed", "payment_id", ev.PaymentID, "event_id", ev.EventID)
-	} else if e.MemberID != ev.MemberID {
+		return nil
+	}
+	if e.MemberID != ev.MemberID {
 		h.log.Warn("reversal member differs from award", "payment_id", ev.PaymentID, "event_member_id", ev.MemberID, "award_member_id", e.MemberID)
 	}
+	if e.Points == 0 {
+		// The award was cut to 0 by the monthly cap: the payment never earned points.
+		h.logNeverEarned(ev, "award cut to 0 by monthly cap")
+	}
 	return nil
+}
+
+// logNeverEarned records a reversal of a payment that never earned points;
+// finance reconciles these from the logs.
+func (h *Handler) logNeverEarned(ev events.Payment, reason string) {
+	h.log.Warn("reversal for payment that never earned points", "payment_id", ev.PaymentID,
+		"member_id", ev.MemberID, "amount_cents", ev.AmountCents, "event_id", ev.EventID, "reason", reason)
 }
