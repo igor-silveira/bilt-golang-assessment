@@ -1,0 +1,4 @@
+{"type":"payment.settled","event_id":"evt_01","payment_id":"pay_1001","member_id":"mbr_ana","amount_cents":245000,"occurred_at":"2026-10-01T13:05:00Z"}
+{"type":"payment.settled","event_id":"evt_02","payment_id":"pay_1002","member_id":"mbr_raj","amount_cents":610000,"occurred_at":"2026-10-01T14:40:00Z"}
+{"type":"payment.settled","event_id":"evt_03","payment_id":"pay_1003","member_id":"mbr_raj","amount_cents":590000,"occurred_at":"2026-10-02T09:12:00Z"}
+{"type":"payment.reversed","event_id":"evt_04","payment_id":"pay_1003","member_id":"mbr_raj","amount_cents":590000,"occurred_at":"2026-10-06T16:00:00Z"}
