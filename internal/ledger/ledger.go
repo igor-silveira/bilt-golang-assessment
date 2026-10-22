@@ -30,10 +30,24 @@ type Entry struct {
 // ErrUnavailable is returned when the ledger cannot be reached. Retrying may succeed.
 var ErrUnavailable = errors.New("ledger: unavailable")
 
+// ErrDuplicate is returned by Append when the payment already has an entry of
+// that kind. In Postgres this is the UNIQUE (payment_id, kind) constraint.
+var ErrDuplicate = errors.New("ledger: duplicate entry")
+
+// ErrNotAwarded is returned by Reverse when the payment has no award entry.
+var ErrNotAwarded = errors.New("ledger: payment was never awarded")
+
+// Store is the points ledger. Award and Reverse are each one atomic, idempotent
+// operation, so they are safe under redelivery and across replicas sharing the ledger.
 type Store interface {
-	HasEntry(ctx context.Context, paymentID string, kind Kind) (bool, error)
-	AwardedInMonth(ctx context.Context, memberID, month string) (int64, error)
-	Append(ctx context.Context, e Entry) error
+	// Award writes the award entry for e.PaymentID, cutting e.Points to the room
+	// left under monthlyCap for e.MemberID in e.Month. If the payment already has
+	// an award, nothing is written and the stored entry is returned.
+	Award(ctx context.Context, e Entry, monthlyCap int64) (stored Entry, created bool, err error)
+	// Reverse writes a reversal that removes exactly the points on the payment's
+	// award entry. If the payment is already reversed, nothing is written and the
+	// stored reversal is returned. It returns ErrNotAwarded if there is no award.
+	Reverse(ctx context.Context, paymentID string) (stored Entry, created bool, err error)
 	Balance(ctx context.Context, memberID string) (int64, error)
 }
 
@@ -56,10 +70,16 @@ type MemoryStore struct {
 
 	mu      sync.Mutex
 	entries []Entry
+	byKey   map[entryKey]int // index into entries
+}
+
+type entryKey struct {
+	paymentID string
+	kind      Kind
 }
 
 func NewMemoryStore(opts ...Option) *MemoryStore {
-	s := &MemoryStore{}
+	s := &MemoryStore{byKey: make(map[entryKey]int)}
 	for _, o := range opts {
 		o(s)
 	}
@@ -80,43 +100,73 @@ func (s *MemoryStore) roundTrip(ctx context.Context, op string) error {
 	return nil
 }
 
-func (s *MemoryStore) HasEntry(ctx context.Context, paymentID string, kind Kind) (bool, error) {
-	if err := s.roundTrip(ctx, "has_entry"); err != nil {
-		return false, err
+// Award holds mu for the whole check-cap-insert, the stand-in for a Postgres
+// transaction that locks the member's month (see NOTES.md).
+func (s *MemoryStore) Award(ctx context.Context, e Entry, monthlyCap int64) (Entry, bool, error) {
+	if err := s.roundTrip(ctx, "award"); err != nil {
+		return Entry{}, false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, e := range s.entries {
-		if e.PaymentID == paymentID && e.Kind == kind {
-			return true, nil
+	if i, ok := s.byKey[entryKey{e.PaymentID, KindAward}]; ok {
+		return s.entries[i], false, nil
+	}
+	var used int64
+	for _, x := range s.entries {
+		if x.MemberID == e.MemberID && x.Month == e.Month && x.Kind == KindAward {
+			used += x.Points
 		}
 	}
-	return false, nil
+	e.Kind = KindAward
+	e.Points = max(min(e.Points, monthlyCap-used), 0)
+	s.insert(e)
+	return e, true, nil
 }
 
-func (s *MemoryStore) AwardedInMonth(ctx context.Context, memberID, month string) (int64, error) {
-	if err := s.roundTrip(ctx, "awarded_in_month"); err != nil {
-		return 0, err
+func (s *MemoryStore) Reverse(ctx context.Context, paymentID string) (Entry, bool, error) {
+	if err := s.roundTrip(ctx, "reverse"); err != nil {
+		return Entry{}, false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var total int64
-	for _, e := range s.entries {
-		if e.MemberID == memberID && e.Month == month && e.Kind == KindAward {
-			total += e.Points
-		}
+	if i, ok := s.byKey[entryKey{paymentID, KindReversal}]; ok {
+		return s.entries[i], false, nil
 	}
-	return total, nil
+	i, ok := s.byKey[entryKey{paymentID, KindAward}]
+	if !ok {
+		return Entry{}, false, ErrNotAwarded
+	}
+	award := s.entries[i]
+	e := Entry{
+		MemberID:  award.MemberID,
+		PaymentID: paymentID,
+		Kind:      KindReversal,
+		Points:    -award.Points,
+		Month:     award.Month,
+	}
+	s.insert(e)
+	return e, true, nil
 }
 
+// Append writes e as is. It enforces one entry per (payment, kind) like the
+// production table; use Award and Reverse to apply the earning rules.
 func (s *MemoryStore) Append(ctx context.Context, e Entry) error {
 	if err := s.roundTrip(ctx, "append"); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries = append(s.entries, e)
+	if _, ok := s.byKey[entryKey{e.PaymentID, e.Kind}]; ok {
+		return ErrDuplicate
+	}
+	s.insert(e)
 	return nil
+}
+
+// insert must be called with mu held.
+func (s *MemoryStore) insert(e Entry) {
+	s.byKey[entryKey{e.PaymentID, e.Kind}] = len(s.entries)
+	s.entries = append(s.entries, e)
 }
 
 func (s *MemoryStore) Balance(ctx context.Context, memberID string) (int64, error) {

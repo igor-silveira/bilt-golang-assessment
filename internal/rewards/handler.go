@@ -56,55 +56,39 @@ func (h *Handler) process(ctx context.Context, ev events.Payment) error {
 	return nil
 }
 
+// award and reverse are each one atomic ledger call, so redeliveries and
+// concurrent deliveries on other replicas cannot double-award or overrun the cap.
 func (h *Handler) award(ctx context.Context, ev events.Payment) error {
-	seen, err := h.store.HasEntry(ctx, ev.PaymentID, ledger.KindAward)
-	if err != nil {
-		return err
-	}
-	if seen {
-		return nil
-	}
-
-	month := Month(ev.OccurredAt)
-	used, err := h.store.AwardedInMonth(ctx, ev.MemberID, month)
-	if err != nil {
-		return err
-	}
-	points := h.policy.Points(ev.AmountCents)
-	if room := h.policy.MonthlyCap - used; points > room {
-		points = max(room, 0)
-	}
-
-	return h.store.Append(ctx, ledger.Entry{
+	e, created, err := h.store.Award(ctx, ledger.Entry{
 		MemberID:  ev.MemberID,
 		PaymentID: ev.PaymentID,
 		Kind:      ledger.KindAward,
-		Points:    points,
-		Month:     month,
-	})
+		Points:    h.policy.Points(ev.AmountCents),
+		Month:     Month(ev.OccurredAt),
+	}, h.policy.MonthlyCap)
+	if err != nil {
+		return err
+	}
+	if !created {
+		h.log.Info("payment already awarded", "payment_id", ev.PaymentID, "event_id", ev.EventID)
+	} else if e.Points < h.policy.Points(ev.AmountCents) {
+		h.log.Info("award cut by monthly cap", "payment_id", ev.PaymentID, "member_id", e.MemberID, "points", e.Points)
+	}
+	return nil
 }
 
 func (h *Handler) reverse(ctx context.Context, ev events.Payment) error {
-	awarded, err := h.store.HasEntry(ctx, ev.PaymentID, ledger.KindAward)
-	if err != nil {
-		return err
-	}
-	if !awarded {
+	e, created, err := h.store.Reverse(ctx, ev.PaymentID)
+	if errors.Is(err, ledger.ErrNotAwarded) {
 		return ErrUnknownPayment
 	}
-	done, err := h.store.HasEntry(ctx, ev.PaymentID, ledger.KindReversal)
 	if err != nil {
 		return err
 	}
-	if done {
-		return nil
+	if !created {
+		h.log.Info("payment already reversed", "payment_id", ev.PaymentID, "event_id", ev.EventID)
+	} else if e.MemberID != ev.MemberID {
+		h.log.Warn("reversal member differs from award", "payment_id", ev.PaymentID, "event_member_id", ev.MemberID, "award_member_id", e.MemberID)
 	}
-
-	return h.store.Append(ctx, ledger.Entry{
-		MemberID:  ev.MemberID,
-		PaymentID: ev.PaymentID,
-		Kind:      ledger.KindReversal,
-		Points:    -h.policy.Points(ev.AmountCents),
-		Month:     Month(ev.OccurredAt),
-	})
+	return nil
 }
