@@ -40,10 +40,22 @@ func (h *Handler) Handle(ctx context.Context, msg pubsub.Message) {
 		return
 	}
 
-	if err := h.process(ctx, ev); err != nil {
-		h.log.Error("processing failed", "payment_id", ev.PaymentID, "type", ev.Type, "err", err)
+	switch err := h.process(ctx, ev); {
+	case err == nil:
+		msg.Ack()
+	case errors.Is(err, ErrUnknownPayment):
+		// Retrying cannot make the payment earn; finance reconciles from this log.
+		h.log.Warn("reversal for payment that never earned points", "payment_id", ev.PaymentID,
+			"member_id", ev.MemberID, "amount_cents", ev.AmountCents, "event_id", ev.EventID)
+		msg.Ack()
+	default:
+		// Ledger errors (ErrUnavailable, timeouts) are transient: nack so the broker
+		// redelivers. Award and Reverse are idempotent, so a retry after a commit
+		// whose result was lost is safe.
+		h.log.Error("processing failed, nacking", "payment_id", ev.PaymentID, "type", ev.Type,
+			"delivery_attempt", msg.DeliveryAttempt(), "err", err)
+		msg.Nack()
 	}
-	msg.Ack()
 }
 
 func (h *Handler) process(ctx context.Context, ev events.Payment) error {
